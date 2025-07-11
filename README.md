@@ -17,8 +17,6 @@ An **end‑to‑end, memory‑safe Airflow pipeline** that streams the entire Io
 11. [Next steps](#next-steps)
 12. [License](#license)
 
----
-
 ## Project Goals
 
 - **Zero‑OOM** – stream the dataset in fixed‑size pages so a 2 GB worker never exceeds a few‑hundred MB RAM.

@@ -2,7 +2,7 @@
 
 An **end‑to‑end, memory‑safe Airflow pipeline** that streams the entire Iowa Liquor Sales open‑data set (≈ 14 M rows) from the public Socrata API into a **PostgreSQL** database on AWS RDS, using Astro Dev for local orchestration.
 
-\## Contents
+## Contents
 
 1. [Project goals](#project-goals)
 2. [High‑level architecture](#high-level-architecture)
@@ -19,14 +19,14 @@ An **end‑to‑end, memory‑safe Airflow pipeline** that streams the entire Io
 
 ---
 
-\## Project Goals
+## Project Goals
 
 - **Zero‑OOM** – stream the dataset in fixed‑size pages so a 2 GB worker never exceeds a few‑hundred MB RAM.
 - **Repeatable** – full refresh or incremental runs via _start / end_ date params.
 - **Auditable** – JSON‑structured task logs preserved on host.
 - **Portable** – Astro Dev for dev → same DAG deploys to any Airflow.
 
-\## High‑Level Architecture
+## High‑Level Architecture
 
 ```
 [Socrata API] ──(extract 50k‑row pages)──▶ /tmp/iowa_liquor_etl/raw/*.parquet
@@ -43,32 +43,37 @@ An **end‑to‑end, memory‑safe Airflow pipeline** that streams the entire Io
 - **Chunk size** = 50 000 rows (≈ 10 MiB) – fits in memory easily.
 - **File format** = Parquet (falls back to CSV if `pyarrow` missing).
 
-\## Directory Layout
+## Directory Layout
 
 ```
 .
 ├── dags/
 │   └── iowa_liquor_dag.py      # Airflow DAG (extract → transform → load)
+├── include/sql/create_table.sql
 ├── src/
 │   ├── config.py               # env vars / tunables
 │   ├── extract.py              # streaming downloader
 │   ├── transform.py            # stateless cleaners
-│   ├── load.py                 # COPY loader to RDS
-│   └── io_helpers.py           # parquet↔csv fallback helpers
-├── include/sql/create_table.sql
-├── local_logs/                 # host‑mounted Airflow logs (optional)
+│   └── load.py                 # COPY loader to RDS
+├── tests/
+│   ├── test_extract.py
+│   ├── test_load.py
+│   └── test_transform.py
+├── tast_extract.log
+├── tast_load.log
+├── tast_transform.log
 ├── requirements.txt
 └── README.md
 ```
 
-\## Prerequisites
+## Prerequisites
 
 - Docker + Docker Compose (Astro CLI bundles Compose)
 - **Astro CLI** ≥ 1.17  `brew install astro`  or  `npm i -g astro@latest`
 - An **AWS RDS** PostgreSQL instance (v14+) and inbound firewall rule for your host.
 - Python 3.12 if you want to run modules standalone.
 
-\### Installation
+### Installation
 
 ```bash
 # 1. Clone project
@@ -83,7 +88,7 @@ $ echo "pyarrow==20.0.0" >> requirements.txt
 $ astro dev start        # builds image & launches webserver, scheduler, etc.
 ```
 
-\## Environment Variables
+## Environment Variables
 Create a `.env` file (loaded by `config.py`) — **never commit secrets**.
 
 ```env
@@ -93,18 +98,16 @@ IOWA_LIQUOR_API=https://data.iowa.gov/resource/sxmw-fs54.csv
 # AWS RDS connection
 POSTGRES_HOST=<your‑rds‑endpoint>
 POSTGRES_PORT=5432
-POSTGRES_DB=iowaliquor
-POSTGRES_USER=etl
-POSTGRES_PASSWORD=super‑secret
+POSTGRES_DB=<your-db-name>
+POSTGRES_USER=<your-db-username>
+POSTGRES_PASSWORD=<password-for-db>
 
 # Optional tunables
 CHUNK_ROWS=50000           # page / COPY size
 TMP_DIR=/tmp/iowa_liquor_etl
 ```
 
----
-
-\## Code Walkthrough
+## Code Walkthrough
 
 | File                 | Key points                                                                                                                          |
 | -------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
@@ -116,9 +119,7 @@ TMP_DIR=/tmp/iowa_liquor_etl
 | `create_table.sql`   | PK `invoice_line_no`, all numeric columns as `NUMERIC` or `INTEGER`.                                                                |
 | `iowa_liquor_dag.py` | 3 `PythonOperator`s. XCom passes list of chunk paths between tasks. Start & end dates hard‑coded but easy to parametrize.           |
 
----
-
-\## Running the Pipeline
+## Running the Pipeline
 
 1. **Set env vars** (`.env`).
 2. `astro dev start` ➜ browse **[http://localhost:8080](http://localhost:8080)** (admin/admin).
@@ -135,38 +136,14 @@ TMP_DIR=/tmp/iowa_liquor_etl
    SELECT COUNT(*) FROM iowa_liquor_sales;  -- 14 245 703
    ```
 
-\### Stopping / Cleaning up
+### Stopping / Cleaning up
 
 ```bash
 astro dev stop    # stop containers (keeps volumes & logs)
 astro dev kill    # remove containers *and* volumes
 ```
 
----
-
-\## Log Collection
-
-> Task logs live in the Docker volume `*_airflow-logs`.
-
-Bind‑mount it in `.astro/config.yaml`:
-
-```yaml
-services:
-  airflow:
-    volumes:
-      - ./local_logs:/usr/local/airflow/logs
-```
-
-Now every run’s output is on host. To archive:
-
-```powershell
-$d = Get-Date -Format 'yyyy-MM-dd'
-tar -czf "logs_$d.tgz" -C local_logs iowa_liquor_etl_pipeline
-```
-
----
-
-\## Troubleshooting
+## Troubleshooting
 
 | Symptom                         | Cause                                 | Fix                                                          |
 | ------------------------------- | ------------------------------------- | ------------------------------------------------------------ |
@@ -174,25 +151,16 @@ tar -czf "logs_$d.tgz" -C local_logs iowa_liquor_etl_pipeline
 | `ImportError: pyarrow`          | Parquet engine missing                | Add `pyarrow` >= 15 to `requirements.txt` and rebuild image. |
 | `tar could not chdir to 'logs'` | Wrong working dir or logs not mounted | `cd` to project root or mount logs volume.                   |
 
----
-
-\## Performance & Results
+## Performance & Results
 
 - **Total rows**         : **14 245 703**
 - **Extract throughput** : \~220 k rows s⁻¹ (API‑limited)
 - **Load throughput**    : \~19 k rows s⁻¹ over residential uplink; will improve significantly inside AWS VPC.
 - **Peak RAM per task**  : < 250 MB (measured with `ps_mem`).
 
----
-
-\## Next Steps
+## Next Steps
 
 1. **Incremental DAG** – parametrize `START_DATE = {{ ds }}` for daily loads.
 2. **S3 staging** – upload Parquet chunks to S3 and run `COPY FROM 's3://…'` for faster in‑region loads.
 3. **Data quality** – add Great Expectations suite & Airflow `DataQualityOperator`.
 4. **dbt** models for reporting tables (sales by county, vendor, time series).
-
----
-
-\## License
-MIT © 2025 Your Company

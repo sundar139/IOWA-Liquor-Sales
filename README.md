@@ -16,11 +16,11 @@ A fully‑automated, streaming Extract–Transform–Load (ETL) workflow that in
 
 ```mermaid
 graph TD
-    A[Socrata API\nIOWA_LIQUOR_API] -- streaming CSV --> B{extract.py\n50 000‑row pages}
-    B --> |raw Parquet chunks| C[TMP_DIR/raw/chunk_*.parquet]
+    A[Socrata API (IOWA_LIQUOR_API)] -- streaming CSV --> B{extract.py (50 000‑row pages)}
+    B --> |Raw Parquet chunks| C[TMP_DIR/raw/chunk_*.parquet]
     C --> D[transform.py\n_clean_chunk]
     D --> |clean Parquet chunks| E[TMP_DIR/clean/chunk_*.parquet]
-    E --> F[load.py\nCOPY to PG]
+    E --> F[load.py (COPY to PG)]
     F --> |14.2 M rows| G[(PostgreSQL)];
     subgraph Airflow DAG
         A1[extract task] --> A2[transform task] --> A3[load task]
@@ -152,13 +152,11 @@ All runtime knobs live in **`src/config.py`** and can be overridden via environm
 | **Load**        | `src/load.py` → `copy_parquet_chunks()`   | • Streams each chunk through an in‑memory CSV buffer.<br>• Executes `COPY … FROM STDIN` (≈1.2 M rows/min).  |
 | **Orchestrate** | `dags/iowa_liquor_dag.py`                 | • Three `PythonOperator`s wired `extract → transform → load`.<br>• No schedule by default (manual trigger). |
 
-## Troubleshooting
+## Troubleshooting
 
-| Symptom                         | Cause                                 | Fix                                                          |
-| ------------------------------- | ------------------------------------- | ------------------------------------------------------------ |
-| `SIGKILL` / task exits          | Worker OOM (killed by kernel)         | Use streaming design (already done) or reduce `CHUNK_ROWS`.  |
-| `ImportError: pyarrow`          | Parquet engine missing                | Add `pyarrow` >= 15 to `requirements.txt` and rebuild image. |
-| `tar could not chdir to 'logs'` | Wrong working dir or logs not mounted | `cd` to project root or mount logs volume.                   |
+| Symptom                | Cause                         | Fix                  |
+| ---------------------- | ----------------------------- | -------------------- |
+| `SIGKILL` / task exits | Worker OOM (killed by kernel) | Reduce `CHUNK_ROWS`. |
 
 ## Performance notes
 

@@ -16,11 +16,11 @@ A fully‑automated, streaming Extract–Transform–Load (ETL) workflow that in
 
 ```mermaid
 graph TD
-    A[Socrata API (IOWA_LIQUOR_API)] -- streaming CSV --> B{extract.py (50,000-row pages)}
+    A[Socrata API\nIOWA_LIQUOR_API] -- streaming CSV --> B{extract.py\n50,000-row pages}
     B --> |Raw Parquet chunks| C[TMP_DIR/raw/chunk_*.parquet]
     C --> D[transform.py<br>_clean_chunk]
     D --> |Clean Parquet chunks| E[TMP_DIR/clean/chunk_*.parquet]
-    E --> F[load.py (COPY to PG)]
+    E --> F[load.py\nCOPY to PG]
     F --> |14.2M rows| G[(PostgreSQL)]
 
     subgraph Airflow DAG

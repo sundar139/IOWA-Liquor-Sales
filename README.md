@@ -156,117 +156,24 @@ All runtime knobs live in **`src/config.py`** and can be overridden via environm
 
 ## Schema Extension for Analytical Star Schema
 
-To support advanced analytics, we’ve added a **star schema** alongside the raw table. It consists of five dimension tables and one fact table:
+Here’s a high‑level narrative of how the analytical star schema was created and populated:
 
-```sql
--- Dimension Tables
-CREATE TABLE IF NOT EXISTS dim_store (
-    store          TEXT PRIMARY KEY,
-    name           TEXT,
-    address        TEXT,
-    city           TEXT,
-    zipcode        TEXT,
-    store_location TEXT,
-    county_number  TEXT,
-    county         TEXT
-);
+1. **Designed a Star Schema**: The single, wide sales table was decomposed into one **fact table** (recording each invoice‑line’s numeric sales measures) and five **dimension tables** (storing descriptive attributes for Store, Date, Item, Vendor, and Category). This arrangement supports flexible slicing and dicing of sales data by any combination of dimensions, following industry‑standard data warehousing practices.
 
-CREATE TABLE IF NOT EXISTS dim_date (
-    date        DATE PRIMARY KEY,
-    year        SMALLINT,
-    quarter     SMALLINT,
-    month       SMALLINT,
-    day_of_week SMALLINT,
-    is_weekend  BOOLEAN
-);
+2. **Created Dimension Tables**: Each business entity—stores, calendar dates, liquor items, vendors, and categories—was given its own table. The primary key in each dimension is the original code or date. Only the necessary descriptive attributes were retained (for example, store code plus name, address, city, zip, county; or date plus year, quarter, month, day‑of‑week, and weekend flag).
 
-CREATE TABLE IF NOT EXISTS dim_item (
-    itemno             TEXT PRIMARY KEY,
-    im_desc            TEXT,
-    pack               INTEGER,
-    bottle_volume_ml   INTEGER,
-    state_bottle_cost  NUMERIC,
-    state_bottle_retail NUMERIC
-);
+3. **Created the Fact Table**: The fact table uses the original invoice‑line number as its primary key and includes foreign‑key columns referencing each dimension. Alongside these keys are the quantitative measures (bottles sold, sales dollars, liters, and gallons) for each transaction line. Foreign‑key constraints ensure referential integrity between facts and dimensions.
 
-CREATE TABLE IF NOT EXISTS dim_vendor (
-    vendor_no   TEXT PRIMARY KEY,
-    vendor_name TEXT
-);
+4. **Upserted Dimension Data**: To load each dimension from the raw table, every distinct key‑attribute combination was selected. Null keys were filtered out to satisfy NOT NULL constraints. An “upsert” pattern (`INSERT ... ON CONFLICT DO NOTHING`) was used so that new dimension rows could be added safely without failing on duplicates, allowing the process to be re‑run as new codes appear over time.
 
-CREATE TABLE IF NOT EXISTS dim_category (
-    category      TEXT PRIMARY KEY,
-    category_name TEXT
-);
+5. **Loaded the Fact Table**: With dimensions in place, all invoice lines were loaded into the fact table. Timestamps were truncated to dates to match the date dimension. The invoice‑line ID was ensured non‑null, and the same `ON CONFLICT DO NOTHING` approach prevented duplicate loads, making the process idempotent for incremental updates.
 
--- Fact Table
-CREATE TABLE IF NOT EXISTS fact_sales (
-    invoice_line_no TEXT PRIMARY KEY,
-    "date"          DATE,
-    store           TEXT,
-    itemno          TEXT,
-    vendor_no       TEXT,
-    category        TEXT,
-    sale_bottles    INTEGER,
-    sale_dollars    NUMERIC,
-    sale_liters     NUMERIC,
-    sale_gallons    NUMERIC,
-    CONSTRAINT fk_store    FOREIGN KEY (store)   REFERENCES dim_store(store),
-    CONSTRAINT fk_date     FOREIGN KEY ("date")  REFERENCES dim_date(date),
-    CONSTRAINT fk_item     FOREIGN KEY (itemno)  REFERENCES dim_item(itemno),
-    CONSTRAINT fk_vendor   FOREIGN KEY (vendor_no) REFERENCES dim_vendor(vendor_no),
-    CONSTRAINT fk_category FOREIGN KEY (category) REFERENCES dim_category(category)
-);
-```
+6. **Resulting Structure**:
 
-**Population Scripts** (using `ON CONFLICT DO NOTHING` to safely upsert):
-
-```sql
--- dim_store
-INSERT INTO dim_store (store,name,address,city,zipcode,store_location,county_number,county)
-SELECT DISTINCT store,name,address,city,zipcode,store_location,county_number,county
-FROM original_sales_table
-WHERE store IS NOT NULL
-ON CONFLICT (store) DO NOTHING;
-
--- dim_date
-INSERT INTO dim_date (date,year,quarter,month,day_of_week,is_weekend)
-SELECT DISTINCT (date_trunc('day',date))::DATE,EXTRACT(YEAR FROM date)::SMALLINT,
-       EXTRACT(QUARTER FROM date)::SMALLINT,EXTRACT(MONTH FROM date)::SMALLINT,
-       EXTRACT(DOW FROM date)::SMALLINT,(EXTRACT(DOW FROM date) IN (0,6))
-FROM original_sales_table
-WHERE date IS NOT NULL
-ON CONFLICT (date) DO NOTHING;
-
--- dim_item
-INSERT INTO dim_item (itemno,im_desc,pack,bottle_volume_ml,state_bottle_cost,state_bottle_retail)
-SELECT DISTINCT itemno,im_desc,pack,bottle_volume_ml,state_bottle_cost,state_bottle_retail
-FROM original_sales_table
-WHERE itemno IS NOT NULL
-ON CONFLICT (itemno) DO NOTHING;
-
--- dim_vendor
-INSERT INTO dim_vendor (vendor_no,vendor_name)
-SELECT DISTINCT vendor_no,vendor_name
-FROM original_sales_table
-WHERE vendor_no IS NOT NULL
-ON CONFLICT (vendor_no) DO NOTHING;
-
--- dim_category
-INSERT INTO dim_category (category,category_name)
-SELECT DISTINCT category,category_name
-FROM original_sales_table
-WHERE category IS NOT NULL
-ON CONFLICT (category) DO NOTHING;
-
--- fact_sales
-INSERT INTO fact_sales (invoice_line_no,"date",store,itemno,vendor_no,category,sale_bottles,sale_dollars,sale_liters,sale_gallons)
-SELECT invoice_line_no,(date_trunc('day',date))::DATE,store,itemno,vendor_no,category,
-       sale_bottles,sale_dollars,sale_liters,sale_gallons
-FROM original_sales_table
-WHERE invoice_line_no IS NOT NULL
-ON CONFLICT (invoice_line_no) DO NOTHING;
-```
+   - Dimension tables now hold clean, deduplicated master lists of stores, dates, items, vendors, and categories.
+   - The fact table links these dimensions at the transaction level, storing all numeric sales measures.
+   - Referential integrity is enforced via foreign‑key constraints.
+   - The upsert approach makes the pipeline safe to run repeatedly without manual de‑duplication.
 
 ## Troubleshooting
 

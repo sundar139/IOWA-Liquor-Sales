@@ -1,0 +1,20 @@
+{
+  "sqltools.connections": [
+    {
+      "pgOptions": {
+        "ssl": {
+          "rejectUnauthorized": false,
+          "requestCert": false
+        }
+      },
+      "previewLimit": 50,
+      "server": "iowa-liquor-db.ca30mo0yiiea.us-east-1.rds.amazonaws.com",
+      "port": 5432,
+      "askForPassword": true,
+      "driver": "PostgreSQL",
+      "name": "IowaLiquor-RDS",
+      "database": "iowa_liquor_db",
+      "username": "postgres"
+    }
+  ]
+}

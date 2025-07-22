@@ -1,16 +1,17 @@
-# Iowa Liquor Sales ETL Pipeline
+# Iowa Liquor Sales ETL Pipeline
 
 A fully‑automated, streaming Extract–Transform–Load (ETL) workflow that ingests the **Iowa Liquor Sales** open dataset (14 M+ rows, \~6 GB), cleans it chunk‑by‑chunk, and loads it efficiently into PostgreSQL using Airflow orchestration.
 
 ## Contents
 
 - [Architecture](#architecture)
-- [Quick start](#quick-start)
-- [Project layout](#project-layout)
+- [Quick start](#quick-start)
+- [Project layout](#project-layout)
 - [Configuration](#configuration)
-- [Module walk‑through](#module-walk-through)
+- [Module walk‑through](#module-walk-through)
+- [Schema Extension for Analytical Star Schema](#schema-extension-for-analytical-star-schema)
 - [Troubleshooting](#troubleshooting)
-- [Performance notes](#performance-notes)
+- [Performance notes](#performance-notes)
 
 ## Architecture
 
@@ -56,7 +57,7 @@ pip install -r requirements.txt
 Copy `.env.example` → `.env` and fill in credentials:
 
 ```bash
-# Sociata API token (optional but avoids throttling)
+# Socrata API token (optional but avoids throttling)
 IOWA_LIQUOR_API=https://data.iowa.gov/resource/s2nq‑tq4e.csv
 
 # Postgres target (local or RDS)
@@ -108,8 +109,6 @@ airflow dags trigger iowa_liquor_etl_pipeline
 
 Monitor via **Airflow UI** → _DAGs_ → `iowa_liquor_etl_pipeline`.
 
-> **Runtime reference:** end‑to‑end load of 14 245 703 rows finished in **\~12 min on a 4 vCPU / 16 GB box** (see sample logs under `tast_*.log`).
-
 ## Project layout
 
 ```
@@ -138,7 +137,7 @@ All runtime knobs live in **`src/config.py`** and can be overridden via environm
 | Variable            | Default              | Description                    |
 | ------------------- | -------------------- | ------------------------------ |
 | `IOWA_LIQUOR_API`   | _none_ (required)    | Socrata CSV endpoint           |
-| `POSTGRES_HOST`     | <your‑rds‑endpoint>  | Target PG                      |
+| `POSTGRES_HOST`     | \<your‑rds‑endpoint> | Target PG                      |
 | `POSTGRES_PORT`     | 5432                 | —                              |
 | `POSTGRES_DB`       | <your-db-name>       | —                              |
 | `POSTGRES_USER`     | <your-db-username>   | —                              |
@@ -155,13 +154,127 @@ All runtime knobs live in **`src/config.py`** and can be overridden via environm
 | **Load**        | `src/load.py` → `copy_parquet_chunks()`   | • Streams each chunk through an in‑memory CSV buffer.<br>• Executes `COPY … FROM STDIN` (≈1.2 M rows/min).  |
 | **Orchestrate** | `dags/iowa_liquor_dag.py`                 | • Three `PythonOperator`s wired `extract → transform → load`.<br>• No schedule by default (manual trigger). |
 
+## Schema Extension for Analytical Star Schema
+
+To support advanced analytics, we’ve added a **star schema** alongside the raw table. It consists of five dimension tables and one fact table:
+
+```sql
+-- Dimension Tables
+CREATE TABLE IF NOT EXISTS dim_store (
+    store          TEXT PRIMARY KEY,
+    name           TEXT,
+    address        TEXT,
+    city           TEXT,
+    zipcode        TEXT,
+    store_location TEXT,
+    county_number  TEXT,
+    county         TEXT
+);
+
+CREATE TABLE IF NOT EXISTS dim_date (
+    date        DATE PRIMARY KEY,
+    year        SMALLINT,
+    quarter     SMALLINT,
+    month       SMALLINT,
+    day_of_week SMALLINT,
+    is_weekend  BOOLEAN
+);
+
+CREATE TABLE IF NOT EXISTS dim_item (
+    itemno             TEXT PRIMARY KEY,
+    im_desc            TEXT,
+    pack               INTEGER,
+    bottle_volume_ml   INTEGER,
+    state_bottle_cost  NUMERIC,
+    state_bottle_retail NUMERIC
+);
+
+CREATE TABLE IF NOT EXISTS dim_vendor (
+    vendor_no   TEXT PRIMARY KEY,
+    vendor_name TEXT
+);
+
+CREATE TABLE IF NOT EXISTS dim_category (
+    category      TEXT PRIMARY KEY,
+    category_name TEXT
+);
+
+-- Fact Table
+CREATE TABLE IF NOT EXISTS fact_sales (
+    invoice_line_no TEXT PRIMARY KEY,
+    "date"          DATE,
+    store           TEXT,
+    itemno          TEXT,
+    vendor_no       TEXT,
+    category        TEXT,
+    sale_bottles    INTEGER,
+    sale_dollars    NUMERIC,
+    sale_liters     NUMERIC,
+    sale_gallons    NUMERIC,
+    CONSTRAINT fk_store    FOREIGN KEY (store)   REFERENCES dim_store(store),
+    CONSTRAINT fk_date     FOREIGN KEY ("date")  REFERENCES dim_date(date),
+    CONSTRAINT fk_item     FOREIGN KEY (itemno)  REFERENCES dim_item(itemno),
+    CONSTRAINT fk_vendor   FOREIGN KEY (vendor_no) REFERENCES dim_vendor(vendor_no),
+    CONSTRAINT fk_category FOREIGN KEY (category) REFERENCES dim_category(category)
+);
+```
+
+**Population Scripts** (using `ON CONFLICT DO NOTHING` to safely upsert):
+
+```sql
+-- dim_store
+INSERT INTO dim_store (store,name,address,city,zipcode,store_location,county_number,county)
+SELECT DISTINCT store,name,address,city,zipcode,store_location,county_number,county
+FROM original_sales_table
+WHERE store IS NOT NULL
+ON CONFLICT (store) DO NOTHING;
+
+-- dim_date
+INSERT INTO dim_date (date,year,quarter,month,day_of_week,is_weekend)
+SELECT DISTINCT (date_trunc('day',date))::DATE,EXTRACT(YEAR FROM date)::SMALLINT,
+       EXTRACT(QUARTER FROM date)::SMALLINT,EXTRACT(MONTH FROM date)::SMALLINT,
+       EXTRACT(DOW FROM date)::SMALLINT,(EXTRACT(DOW FROM date) IN (0,6))
+FROM original_sales_table
+WHERE date IS NOT NULL
+ON CONFLICT (date) DO NOTHING;
+
+-- dim_item
+INSERT INTO dim_item (itemno,im_desc,pack,bottle_volume_ml,state_bottle_cost,state_bottle_retail)
+SELECT DISTINCT itemno,im_desc,pack,bottle_volume_ml,state_bottle_cost,state_bottle_retail
+FROM original_sales_table
+WHERE itemno IS NOT NULL
+ON CONFLICT (itemno) DO NOTHING;
+
+-- dim_vendor
+INSERT INTO dim_vendor (vendor_no,vendor_name)
+SELECT DISTINCT vendor_no,vendor_name
+FROM original_sales_table
+WHERE vendor_no IS NOT NULL
+ON CONFLICT (vendor_no) DO NOTHING;
+
+-- dim_category
+INSERT INTO dim_category (category,category_name)
+SELECT DISTINCT category,category_name
+FROM original_sales_table
+WHERE category IS NOT NULL
+ON CONFLICT (category) DO NOTHING;
+
+-- fact_sales
+INSERT INTO fact_sales (invoice_line_no,"date",store,itemno,vendor_no,category,sale_bottles,sale_dollars,sale_liters,sale_gallons)
+SELECT invoice_line_no,(date_trunc('day',date))::DATE,store,itemno,vendor_no,category,
+       sale_bottles,sale_dollars,sale_liters,sale_gallons
+FROM original_sales_table
+WHERE invoice_line_no IS NOT NULL
+ON CONFLICT (invoice_line_no) DO NOTHING;
+```
+
 ## Troubleshooting
 
 | Symptom                | Cause                         | Fix                  |
 | ---------------------- | ----------------------------- | -------------------- |
-| `SIGKILL` / task exits | Worker OOM (killed by kernel) | Reduce `CHUNK_ROWS`. |
+| `SIGKILL` / task exits | Worker OOM (killed by kernel) | Reduce `CHUNK_ROWS`. |
 
-## Performance notes
+## Performance notes
 
 - **Chunk size** (`CHUNK_ROWS`) – 50 000 rows was empirically the sweet spot between API latency & PG COPY buffer size.
 - **I/O** – Parquet/Arrow yields \~4× smaller on‑disk size vs CSV and avoids parser cost on reload.
